@@ -9,6 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check PR description for evidence
+        id: check-evidence
         uses: actions/github-script@v7
         with:
           script: |
@@ -16,10 +17,49 @@ jobs:
             const isNotApplicable = /(not applicable|n\/a|na)/i.test(body);
             if (isNotApplicable) {
               console.log("Testing evidence marked as not applicable - check passed.");
+              core.setOutput('passed', 'true');
               return;
             }
-            const hasMedia = /(https?:\/\/.*\.(png|jpg|jpeg|gif|mp4|mov))/i.test(body);
+            // Check for media in multiple formats:
+            // 1. URLs with file extensions (png, jpg, jpeg, gif, mp4, mov)
+            // 2. GitHub user-attachments URLs
+            // 3. Image tags with src attributes
+            const hasFileExtension = /(https?:\/\/.*\.(png|jpg|jpeg|gif|mp4|mov))/i.test(body);
+            const hasGitHubAttachment = /https?:\/\/github\.com\/user-attachments\/assets\//i.test(body);
+            const hasImgTag = /<img[^>]*src=["'](https?:\/\/[^"']+)["']/i.test(body);
+            
+            const hasMedia = hasFileExtension || hasGitHubAttachment || hasImgTag;
             if (!hasMedia) {
+              core.setOutput('passed', 'false');
               core.setFailed("PR description must include a photo/video link as testing evidence.");
+            } else {
+              core.setOutput('passed', 'true');
             }
+      
+      - name: Block merge if check failed
+        if: steps.check-evidence.outputs.passed != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const repo = context.repo;
+            
+            // Create a status check that will block merging
+            await github.rest.repos.createCommitStatus({
+              owner: repo.owner,
+              repo: repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: 'failure',
+              context: 'PR Evidence Check / check-description',
+              description: 'PR description must include testing evidence or mark as not applicable',
+              target_url: `https://github.com/${repo.owner}/${repo.repo}/pull/${prNumber}`
+            });
+            
+            // Comment on PR to indicate blocking
+            await github.rest.issues.createComment({
+              owner: repo.owner,
+              repo: repo.repo,
+              issue_number: prNumber,
+              body: '❌ **Merge Blocked**: This PR cannot be merged until the description includes testing evidence (photo/video link) or is marked as "not applicable".'
+            });
 
