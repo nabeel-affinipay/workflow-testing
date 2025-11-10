@@ -89,13 +89,15 @@ jobs:
       
       - name: Check comment for testing evidence
         id: check-evidence
-        if: steps.evidence-comment.outputs.comment_id != ''
+        env:
+          COMMENT_ID: ${{ steps.evidence-comment.outputs.comment_id }}
+        if: env.COMMENT_ID != ''
         uses: actions/github-script@v7
         with:
           script: |
             const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
             const repo = context.repo;
-            const commentId = steps.evidence-comment.outputs.comment_id;
+            const commentId = process.env.COMMENT_ID;
             const COMMENT_MARKER = '<!-- PR_EVIDENCE_CHECK -->';
             
             // Get the latest version of the comment (in case it was edited)
@@ -109,14 +111,25 @@ jobs:
               const comment = await github.rest.issues.getComment({
                 owner: repo.owner,
                 repo: repo.repo,
-                comment_id: commentId
+                comment_id: parseInt(commentId)
               });
               commentBody = comment.data.body;
-              console.log("Fetched comment by ID");
+              console.log("Fetched comment by ID:", commentId);
             } else {
-              // Fallback to output from previous step
-              commentBody = steps.evidence-comment.outputs.comment_body;
-              console.log("Using comment body from previous step");
+              console.log("No comment ID available, trying to find comment...");
+              // Fallback: find the comment by searching all comments
+              const comments = await github.rest.issues.listComments({
+                owner: repo.owner,
+                repo: repo.repo,
+                issue_number: prNumber,
+              });
+              const evidenceComment = comments.data.find(comment => 
+                comment.body.includes(COMMENT_MARKER)
+              );
+              if (evidenceComment) {
+                commentBody = evidenceComment.body;
+                console.log("Found evidence comment by searching");
+              }
             }
             
             if (!commentBody) {
@@ -150,14 +163,18 @@ jobs:
       
       - name: Update status check
         if: always()
+        env:
+          COMMENT_ID: ${{ steps.evidence-comment.outputs.comment_id }}
+          CHECK_PASSED: ${{ steps.check-evidence.outputs.passed }}
         uses: actions/github-script@v7
         with:
           script: |
             const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
             const repo = context.repo;
+            const commentId = process.env.COMMENT_ID;
             
             // Skip if this was triggered by a non-evidence comment
-            if (steps.evidence-comment.outputs.comment_id === '') {
+            if (!commentId || commentId === '') {
               console.log("Skipping status check update - not an evidence comment event");
               return;
             }
@@ -179,7 +196,7 @@ jobs:
             }
             
             // Determine if check passed (default to false if step was skipped or failed)
-            const passed = steps.check-evidence.outputs.passed === 'true' || false;
+            const passed = process.env.CHECK_PASSED === 'true';
             
             await github.rest.repos.createCommitStatus({
               owner: repo.owner,
