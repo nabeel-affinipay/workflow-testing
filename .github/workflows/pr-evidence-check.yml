@@ -3,55 +3,199 @@ name: PR Evidence Check
 on:
   pull_request:
     types: [opened, edited, synchronize]
+  issue_comment:
+    types: [created, edited]
 
 jobs:
-  check-description:
+  check-evidence-comment:
     runs-on: ubuntu-latest
     steps:
-      - name: Check PR description for evidence
-        id: check-evidence
+      - name: Create or find evidence comment
+        id: evidence-comment
         uses: actions/github-script@v7
         with:
           script: |
-            const body = context.payload.pull_request.body || "";
-            const isNotApplicable = /(not applicable|n\/a|na)/i.test(body);
+            const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
+            const repo = context.repo;
+            const action = context.payload.action;
+            const COMMENT_MARKER = '<!-- PR_EVIDENCE_CHECK -->';
+            
+            // If this is a comment event, check if it's the evidence comment
+            if (action === 'created' || action === 'edited') {
+              const comment = context.payload.comment;
+              if (comment && comment.body.includes(COMMENT_MARKER)) {
+                // This is the evidence comment being edited
+                console.log(`Evidence comment ${action}: ${comment.id}`);
+                core.setOutput('comment_id', comment.id);
+                core.setOutput('comment_body', comment.body);
+                return;
+              } else if (comment) {
+                // This is a different comment, skip processing
+                console.log("Comment event is not for evidence comment, skipping...");
+                core.setOutput('comment_id', '');
+                core.setOutput('comment_body', '');
+                return;
+              }
+            }
+            
+            // For PR events, create or find the evidence comment
+            const COMMENT_BODY = `${COMMENT_MARKER}
+            
+            ## 📸 Testing Evidence Required
+            
+            Please provide testing evidence in this comment by:
+            - Adding a photo/video link (e.g., \`https://example.com/test.png\`)
+            - Or marking as "not applicable" if testing evidence is not needed
+            
+            **Note**: This comment will be checked for testing evidence. Update this comment with your evidence.
+            `;
+            
+            // Get all comments on the PR
+            const comments = await github.rest.issues.listComments({
+              owner: repo.owner,
+              repo: repo.repo,
+              issue_number: prNumber,
+            });
+            
+            // Find existing evidence comment
+            let evidenceComment = comments.data.find(comment => 
+              comment.body.includes(COMMENT_MARKER)
+            );
+            
+            // If PR was just opened and no evidence comment exists, create one
+            if (action === 'opened' && !evidenceComment) {
+              evidenceComment = await github.rest.issues.createComment({
+                owner: repo.owner,
+                repo: repo.repo,
+                issue_number: prNumber,
+                body: COMMENT_BODY
+              });
+              console.log(`Created new evidence comment: ${evidenceComment.data.id}`);
+            } else if (!evidenceComment) {
+              // If PR was edited/synchronized but no comment exists yet, create it
+              evidenceComment = await github.rest.issues.createComment({
+                owner: repo.owner,
+                repo: repo.repo,
+                issue_number: prNumber,
+                body: COMMENT_BODY
+              });
+              console.log(`Created evidence comment: ${evidenceComment.data.id}`);
+            } else {
+              console.log(`Found existing evidence comment: ${evidenceComment.id}`);
+            }
+            
+            core.setOutput('comment_id', evidenceComment.id || evidenceComment.data.id);
+            core.setOutput('comment_body', evidenceComment.body || evidenceComment.data.body);
+      
+      - name: Check comment for testing evidence
+        id: check-evidence
+        if: steps.evidence-comment.outputs.comment_id != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
+            const repo = context.repo;
+            const commentId = steps.evidence-comment.outputs.comment_id;
+            const COMMENT_MARKER = '<!-- PR_EVIDENCE_CHECK -->';
+            
+            // Get the latest version of the comment (in case it was edited)
+            let commentBody;
+            if (context.payload.comment && context.payload.comment.body.includes(COMMENT_MARKER)) {
+              // If this is triggered by a comment event, use that comment
+              commentBody = context.payload.comment.body;
+              console.log("Using comment from event payload");
+            } else if (commentId) {
+              // Otherwise, fetch the comment by ID
+              const comment = await github.rest.issues.getComment({
+                owner: repo.owner,
+                repo: repo.repo,
+                comment_id: commentId
+              });
+              commentBody = comment.data.body;
+              console.log("Fetched comment by ID");
+            } else {
+              // Fallback to output from previous step
+              commentBody = steps.evidence-comment.outputs.comment_body;
+              console.log("Using comment body from previous step");
+            }
+            
+            if (!commentBody) {
+              console.log("No comment body found, marking as failed");
+              core.setOutput('passed', 'false');
+              core.setFailed("Could not find PR evidence comment.");
+              return;
+            }
+            
+            console.log("Checking comment for testing evidence...");
+            console.log("Comment body:", commentBody);
+            
+            // Check if marked as not applicable
+            const isNotApplicable = /(not applicable|n\/a|na)/i.test(commentBody);
             if (isNotApplicable) {
               console.log("Testing evidence marked as not applicable - check passed.");
               core.setOutput('passed', 'true');
               return;
             }
-            const hasMedia = /(https?:\/\/.*\.(png|jpg|jpeg|gif|mp4|mov))/i.test(body);
+            
+            // Check for media links
+            const hasMedia = /(https?:\/\/.*\.(png|jpg|jpeg|gif|mp4|mov))/i.test(commentBody);
             if (!hasMedia) {
+              console.log("No testing evidence found in comment.");
               core.setOutput('passed', 'false');
-              core.setFailed("PR description must include a photo/video link as testing evidence.");
+              core.setFailed("The PR evidence comment must include a photo/video link as testing evidence or be marked as 'not applicable'.");
             } else {
+              console.log("Testing evidence found in comment - check passed.");
               core.setOutput('passed', 'true');
             }
       
-      - name: Block merge if check failed
-        if: steps.check-evidence.outputs.passed != 'true'
+      - name: Update status check
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = context.payload.pull_request.number;
+            const prNumber = context.payload.pull_request?.number || context.payload.issue?.number;
             const repo = context.repo;
             
-            // Create a status check that will block merging
+            // Skip if this was triggered by a non-evidence comment
+            if (steps.evidence-comment.outputs.comment_id === '') {
+              console.log("Skipping status check update - not an evidence comment event");
+              return;
+            }
+            
+            // Get the PR head SHA
+            let headSha = context.payload.pull_request?.head?.sha;
+            if (!headSha && prNumber) {
+              const pr = await github.rest.pulls.get({
+                owner: repo.owner,
+                repo: repo.repo,
+                pull_number: prNumber
+              });
+              headSha = pr.data.head.sha;
+            }
+            
+            if (!headSha) {
+              console.log("Could not determine PR head SHA, skipping status check");
+              return;
+            }
+            
+            // Determine if check passed (default to false if step was skipped or failed)
+            const passed = steps.check-evidence.outputs.passed === 'true' || false;
+            
             await github.rest.repos.createCommitStatus({
               owner: repo.owner,
               repo: repo.repo,
-              sha: context.payload.pull_request.head.sha,
-              state: 'failure',
+              sha: headSha,
+              state: passed ? 'success' : 'failure',
               context: 'PR Evidence Check / check-description',
-              description: 'PR description must include testing evidence or mark as not applicable',
+              description: passed 
+                ? 'Testing evidence found in PR comment' 
+                : 'PR evidence comment must include testing evidence or mark as not applicable',
               target_url: `https://github.com/${repo.owner}/${repo.repo}/pull/${prNumber}`
             });
             
-            // Comment on PR to indicate blocking
-            await github.rest.issues.createComment({
-              owner: repo.owner,
-              repo: repo.repo,
-              issue_number: prNumber,
-              body: '❌ **Merge Blocked**: This PR cannot be merged until the description includes testing evidence (photo/video link) or is marked as "not applicable".'
-            });
+            if (!passed) {
+              console.log("❌ Status check set to failure - merge will be blocked");
+            } else {
+              console.log("✅ Status check set to success - merge allowed");
+            }
 
