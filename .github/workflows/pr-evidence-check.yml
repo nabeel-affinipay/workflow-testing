@@ -20,7 +20,15 @@ jobs:
               core.setOutput('passed', 'true');
               return;
             }
-            const hasMedia = /(https?:\/\/.*\.(png|jpg|jpeg|gif|mp4|mov))/i.test(body);
+            // Check for media in multiple formats:
+            // 1. URLs with file extensions (png, jpg, jpeg, gif, mp4, mov)
+            // 2. GitHub user-attachments URLs
+            // 3. Image tags with src attributes
+            const hasFileExtension = /(https?:\/\/.*\.(png|jpg|jpeg|gif|mp4|mov))/i.test(body);
+            const hasGitHubAttachment = /https?:\/\/github\.com\/user-attachments\/assets\//i.test(body);
+            const hasImgTag = /<img[^>]*src=["'](https?:\/\/[^"']+)["']/i.test(body);
+            
+            const hasMedia = hasFileExtension || hasGitHubAttachment || hasImgTag;
             if (!hasMedia) {
               core.setOutput('passed', 'false');
               core.setFailed("PR description must include a photo/video link as testing evidence.");
