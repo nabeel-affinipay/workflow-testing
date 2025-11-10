@@ -1,0 +1,25 @@
+name: PR Evidence Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  check-description:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR description for evidence
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || "";
+            const isNotApplicable = /(not applicable|n\/a|na)/i.test(body);
+            if (isNotApplicable) {
+              console.log("Testing evidence marked as not applicable - check passed.");
+              return;
+            }
+            const hasMedia = /(https?:\/\/.*\.(png|jpg|jpeg|gif|mp4|mov))/i.test(body);
+            if (!hasMedia) {
+              core.setFailed("PR description must include a photo/video link as testing evidence.");
+            }
+
